@@ -65,8 +65,10 @@ var (
 	indexTxtPath             = kingpin.Flag("easyrsa.index-path", "path to easyrsa index file").Default("").Envar("OVPN_INDEX_PATH").String()
 	ccdEnabled               = kingpin.Flag("ccd", "enable client-config-dir").Default("false").Envar("OVPN_CCD").Bool()
 	ccdDir                   = kingpin.Flag("ccd.path", "path to client-config-dir").Default("./ccd").Envar("OVPN_CCD_PATH").String()
+	openvpnSetupDir          = kingpin.Flag("ccd.setup-path", "path to setup-config-dir").Default("./setup").Envar("OVPN_SETUP_PATH").String()
 	clientConfigTemplatePath = kingpin.Flag("templates.clientconfig-path", "path to custom client.conf.tpl").Default("").Envar("OVPN_TEMPLATES_CC_PATH").String()
 	ccdTemplatePath          = kingpin.Flag("templates.ccd-path", "path to custom ccd.tpl").Default("").Envar("OVPN_TEMPLATES_CCD_PATH").String()
+	openvpnTemplatePath      = kingpin.Flag("templates.openvpn-tpl-path", "path to custom openvpn.tpl").Default("").Envar("OVPN_TEMPLATES_OPENVPN_PATH").String()
 	authByPassword           = kingpin.Flag("auth.password", "enable additional password authentication").Default("false").Envar("OVPN_AUTH").Bool()
 	authDatabase             = kingpin.Flag("auth.db", "database path for password authentication").Default("./easyrsa/pki/users.db").Envar("OVPN_AUTH_DB_PATH").String()
 	logLevel                 = kingpin.Flag("log.level", "set log level: trace, debug, info, warn, error (default info)").Default("info").Envar("LOG_LEVEL").String()
@@ -301,6 +303,7 @@ func (oAdmin *OvpnAdmin) userDeleteHandler(w http.ResponseWriter, r *http.Reques
 	}
 	_ = r.ParseForm()
 	err, msg := oAdmin.userDelete(r.FormValue("username"))
+	fmt.Fprintf(w, "%s", oAdmin.DeleteRoute(r.FormValue("username")))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	} else {
@@ -400,6 +403,7 @@ func (oAdmin *OvpnAdmin) userApplyCcdHandler(w http.ResponseWriter, r *http.Requ
 	ccdApplied, applyStatus := oAdmin.modifyCcd(ccd)
 
 	if ccdApplied {
+		oAdmin.InsertRoute(ccd)
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, applyStatus)
 		return
@@ -534,6 +538,16 @@ func main() {
 
 	if *ccdEnabled {
 		ovpnAdmin.modules = append(ovpnAdmin.modules, "ccd")
+	}
+	_, err := os.Stat(*authDatabase)
+	if err != nil {
+		if os.IsNotExist(err) {
+			err := fWrite(*indexTxtPath, "")
+			if err != nil {
+				return
+			}
+			runBash(fmt.Sprintf("openvpn-user db-init --db.path %s", *authDatabase))
+		}
 	}
 
 	if ovpnAdmin.role == "slave" {
@@ -727,6 +741,18 @@ func (oAdmin *OvpnAdmin) getCcdTemplate() *template.Template {
 	}
 }
 
+func (oAdmin *OvpnAdmin) getOpenvpnTemplate() *template.Template {
+	if *openvpnTemplatePath != "" {
+		return template.Must(template.ParseFiles(*openvpnTemplatePath))
+	} else {
+		openvpnTpl, openvpnTplErr := oAdmin.templates.FindString("openvpn.tpl")
+		if openvpnTplErr != nil {
+			log.Printf("ERROR: openvpnTpl not found in templates box")
+		}
+		return template.Must(template.New("openvpn").Parse(openvpnTpl))
+	}
+}
+
 func (oAdmin *OvpnAdmin) parseCcd(username string) Ccd {
 	ccd := Ccd{}
 	ccd.User = username
@@ -748,7 +774,7 @@ func (oAdmin *OvpnAdmin) parseCcd(username string) Ccd {
 			switch {
 			case strings.HasPrefix(str[0], "ifconfig-push"):
 				ccd.ClientAddress = str[1]
-			case strings.HasPrefix(str[0], "push"):
+			case strings.HasPrefix(str[0], "push") || strings.HasPrefix(str[0], "iroute"):
 				ccd.CustomRoutes = append(ccd.CustomRoutes, ccdRoute{Address: strings.Trim(str[2], "\""), Mask: strings.Trim(str[3], "\""), Description: strings.Trim(strings.Join(str[4:], ""), "#")})
 			}
 		}
@@ -1608,4 +1634,90 @@ func crlFix() {
 	if err != nil {
 		log.Error(err)
 	}
+}
+
+func (oAdmin *OvpnAdmin) DeleteRoute(username string) bool {
+	compile, err := regexp.Compile("##" + username + "-start##([\\s\\S]*)##" + username + "-end##")
+	if err != nil {
+		log.Printf("ERROR: delete route into openvpn.conf: %s\n", err)
+		return false
+	}
+	var rep []byte
+	if *openvpnSetupDir == "" {
+		return false
+	}
+	fileName := *openvpnSetupDir + "/openvpn.conf"
+	var contentOld []byte
+	contentOld, err = ioutil.ReadFile(fileName)
+	if err != nil {
+		log.Fatal(err)
+		return false
+	}
+
+	if compile.Match(contentOld) {
+		rep = compile.ReplaceAll(contentOld, []byte(""))
+	}
+	err = ioutil.WriteFile(fileName, rep, 0644)
+	if err != nil {
+		return false
+	}
+	return true
+}
+
+func (oAdmin *OvpnAdmin) InsertRoute(ccd Ccd) bool {
+	var contentOld []byte
+	var err error
+	var content string
+
+	if len(ccd.CustomRoutes) == 0 {
+		content = ""
+	} else {
+		content = "\n##" + ccd.User + "-start##\n"
+		t := oAdmin.getOpenvpnTemplate()
+		var tmp bytes.Buffer
+		tplErr := t.Execute(&tmp, ccd)
+
+		if tmp.Len() == 0 {
+			content = ""
+		} else {
+			content += tmp.String()
+			content += "\n##" + ccd.User + "-end##\n"
+		}
+		if tplErr != nil {
+			content = ""
+		}
+
+	}
+
+	if *openvpnSetupDir == "" {
+		return false
+	}
+
+	fileName := *openvpnSetupDir + "/openvpn.conf"
+	contentOld, err = ioutil.ReadFile(fileName)
+	if err != nil {
+		log.Fatal(err)
+	}
+	compile, err := regexp.Compile("##" + ccd.User + "-start##([\\s\\S]*)##" + ccd.User + "-end##")
+	if err != nil {
+		log.Printf("ERROR: insert route into openvpn.conf: %s\n", err)
+		return false
+	}
+	var rep []byte
+
+	if compile.Match(contentOld) {
+		rep = compile.ReplaceAll(contentOld, []byte(content))
+	} else {
+		repBuffer := bytes.NewBuffer(contentOld)
+		_, err = repBuffer.WriteString("\n" + content)
+		if err != nil {
+			return false
+		}
+		rep = repBuffer.Bytes()
+	}
+	err = ioutil.WriteFile(fileName, rep, 0644)
+	if err != nil {
+		return false
+	}
+	return true
 }

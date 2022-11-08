@@ -7,6 +7,11 @@ SERVER_CERT="${EASY_RSA_LOC}/pki/issued/server.crt"
 OVPN_SRV_NET=${OVPN_SERVER_NET:-172.16.100.0}
 OVPN_SRV_MASK=${OVPN_SERVER_MASK:-255.255.255.0}
 
+OVPN_SRV_MGMT=${OVPN_MGMT:-127.0.0.1}
+
+# 设置需要检测的文件
+fileDir="${OVPN_SETUP_PATH:-/etc/openvpn/setup/openvpn.conf}"
+
 
 cd $EASY_RSA_LOC
 
@@ -56,4 +61,33 @@ fi
 
 mkdir -p /etc/openvpn/ccd
 
-openvpn --config /etc/openvpn/openvpn.conf --client-config-dir /etc/openvpn/ccd --port 1194 --proto tcp --management 127.0.0.1 8989 --dev tun0 --server ${OVPN_SRV_NET} ${OVPN_SRV_MASK}
+#函数定义
+function restartOpenvpn(){
+    appId=$(ps aux | grep "[o]penvpn --config" |  awk '{print $1}')
+    if [ "$appId" ]; then
+        kill -9 "$appId"
+    fi
+
+    nohup openvpn --config /etc/openvpn/openvpn.conf --client-config-dir /etc/openvpn/ccd --port 1194 --proto tcp --management ${OVPN_SRV_MGMT} 8989 --dev tun0 --server ${OVPN_SRV_NET} ${OVPN_SRV_MASK} >> /tmp/openvpn.log 2>&1 &
+
+}
+#函数调用
+restartOpenvpn
+
+
+
+nohup \
+inotifywait -mr \
+  --timefmt '%d/%m/%y %H:%M' --format '%T %w %f' \
+  -e modify $fileDir |
+while read -r date time dir file; do
+       changed_abs=${dir}${file}
+
+       echo $(date +%F%n%T) $changed_abs 'has been changed' >> /tmp/openvpn.log
+       # 重启应用
+       restartOpenvpn
+
+done >> /tmp/openvpn.log 2>&1 &
+
+tail -f /tmp/openvpn.log
+
