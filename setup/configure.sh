@@ -63,11 +63,13 @@ mkdir -p /etc/openvpn/ccd
 
 #函数定义
 function restartOpenvpn(){
+    echo "重启openvpn......"
     appId=$(ps aux | grep "[o]penvpn --config" |  awk '{print $1}')
     if [ "$appId" ]; then
         kill -9 "$appId"
+        cp -f /etc/openvpn/setup/openvpn.conf /etc/openvpn/openvpn.conf
+        sleep 2
     fi
-
     nohup openvpn --config /etc/openvpn/openvpn.conf --client-config-dir /etc/openvpn/ccd --port 1194 --proto tcp --management ${OVPN_SRV_MGMT} 8989 --dev tun0 --server ${OVPN_SRV_NET} ${OVPN_SRV_MASK} >> /tmp/openvpn.log 2>&1 &
 
 }
@@ -83,7 +85,7 @@ inotifywait -mr \
 while read -r date time dir file; do
        changed_abs=${dir}${file}
 
-       echo $(date +%F%n%T) $changed_abs 'has been changed' >> /tmp/openvpn.log
+       echo $(date +%F%n%T) $changed_abs '已经被改变，执行重启步骤！'>>/tmp/openvpn.log
        # 重启应用
        restartOpenvpn
 
