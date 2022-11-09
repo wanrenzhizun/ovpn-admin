@@ -236,6 +236,7 @@ new Vue({
       _this.u.modalDeleteUserVisible = true;
       var data = new URLSearchParams();
       data.append('username', _this.username);
+      _this.deleteUser(_this.username)
     })
     _this.$root.$on('u-show-config', function () {
       _this.u.modalShowConfigVisible = true;
